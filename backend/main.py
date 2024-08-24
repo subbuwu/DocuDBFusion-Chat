@@ -19,12 +19,39 @@ from langchain_community.utilities import SQLDatabase
 from langchain.prompts import PromptTemplate
 from langchain_community.llms import Ollama
 # from langchain.chains import RetrievalQA
+from config import huggingface_api_token,pinecone_api_key
 from sentence_transformers import SentenceTransformer
 from langchain_core.documents import Document
 # from langchain.memory import ConversationBufferMemory
 # from langchain.chains import ConversationalRetrievalChain
 import uuid
 app = FastAPI()
+
+DATABASE_SCHEMA = """
+-- Users Table
+CREATE TABLE IF NOT EXISTS user (
+    userid INTEGER PRIMARY KEY,
+    surveyid INTEGER
+);
+
+-- Surveys Table
+CREATE TABLE IF NOT EXISTS survey (
+    surveyid INTEGER PRIMARY KEY,
+    ques_id INTEGER,
+    ques TEXT,
+    UNIQUE(surveyid, ques_id)
+);
+
+-- Responses Table
+CREATE TABLE IF NOT EXISTS responses (
+    userid INTEGER,
+    surveyid INTEGER,
+    quesid INTEGER,
+    response TEXT,
+    FOREIGN KEY (userid) REFERENCES user(userid),
+    FOREIGN KEY (surveyid) REFERENCES survey(surveyid)
+);
+"""
 
 # Configure CORS
 app.add_middleware(
@@ -36,8 +63,8 @@ app.add_middleware(
 )
 
 # Initialize environment variables
-os.environ["HUGGINGFACE_API_TOKEN"] = "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"
-os.environ["PINECONE_API_KEY"] = "1876ee8c-5e40-4c01-ba21-1818d3902fb8"
+os.environ["HUGGINGFACE_API_TOKEN"] = huggingface_api_token
+os.environ["PINECONE_API_KEY"] = pinecone_api_key
 
 # SQLite database connection
 DATABASE_URL = "sqlite:///./survey_database.db"
@@ -101,30 +128,30 @@ def init_db():
 
     print("Database initialized successfully.")
 
-def get_database_schema():
-    conn = sqlite3.connect("survey_database.db")
-    cursor = conn.cursor()
+# def get_database_schema():
+#     conn = sqlite3.connect("survey_database.db")
+#     cursor = conn.cursor()
     
-    # Retrieve the list of tables
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = cursor.fetchall()
+#     # Retrieve the list of tables
+#     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+#     tables = cursor.fetchall()
     
-    schema = {}
+#     schema = {}
     
-    for table_name in tables:
-        table_name = table_name[0]
-        cursor.execute(f"PRAGMA table_info({table_name});")
-        columns = cursor.fetchall()
-        schema[table_name] = [(col[1], col[2]) for col in columns]  # column name and type
+#     for table_name in tables:
+#         table_name = table_name[0]
+#         cursor.execute(f"PRAGMA table_info({table_name});")
+#         columns = cursor.fetchall()
+#         schema[table_name] = [(col[1], col[2]) for col in columns]  # column name and type
     
-    conn.close()
+#     conn.close()
     
-    return schema
+#     return schema
 
 db = SQLDatabase.from_uri(DATABASE_URL)
 
 # Initialize Pinecone
-pc = Pinecone(api_key="1876ee8c-5e40-4c01-ba21-1818d3902fb8")
+pc = Pinecone(api_key=pinecone_api_key)
 index_name = 'testing-pdf-index'
 
 def create_pinecone_index(index_name):
@@ -152,9 +179,10 @@ def create_pinecone_index(index_name):
 create_pinecone_index(index_name=index_name)
 
 init_db()
-
 model = SentenceTransformer('all-MiniLM-L6-v2')
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+# we can hardcode the db schema and give it to the backend
 
 llm = Ollama(model="llama3")
 
@@ -162,19 +190,13 @@ llm = Ollama(model="llama3")
 vector_store = PineconeVectorStore(index=pc.Index(index_name), embedding=embeddings)
 
 def generate_sql_query(question: str) -> str:
-    schema = get_database_schema()
-    
-    schema_info = "\n".join([
-        f"Table: {table}\nColumns: {', '.join([f'{col[0]} ({col[1]})' for col in cols])}"
-        for table, cols in schema.items()
-    ])
     
     prompt_template = f"""
     Given the following question and database schema, generate the SQL query that would answer it. 
     Provide only the SQL query without any additional text.
 
     Database Schema:
-    {schema_info}
+    {DATABASE_SCHEMA}
 
     Question: {{question}}
 
@@ -355,21 +377,22 @@ async def chat(request: ChatRequest):
     
     # Combine answers from both PDF and database
     final_template = """
-    Answer the following question using information from both the PDFs (if available) and the database:
-    
+    Answer the following question using information from the PDFs and the database. If the information from the PDFs or database is not directly relevant, respond naturally and try to provide a helpful answer based on general knowledge.
+
     PDF Information: {pdf_answer}
     
     Database Information: {db_answer}
     
-    The database contains the following tables:
-    1. user(userid, surveyid)
-    2. survey(surveyid, ques_id, ques)
-    3. responses(userid, surveyid, quesid, response)
+    The database includes details about:
+    - Users and their associated surveys
+    - Survey questions
+    - Responses from users to the survey questions
     
     Question: {question}
     
     Combined Answer:
     """
+
     final_prompt = ChatPromptTemplate.from_template(final_template)
     
     # Generate the final combined answer
