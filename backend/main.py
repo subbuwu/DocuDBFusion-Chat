@@ -205,77 +205,111 @@ def query_database(question: str):
         print(f"Error during SQL execution: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
-def process_pdfs():
+
+def get_pdf_retriever():
+    return vector_store.as_retriever()
+@app.post("/upload-pdf/")
+async def upload_pdf(file: UploadFile = File(...)):
     all_documents = []
+    print(pdf_tracker)
+    try:
+        file_id = str(uuid.uuid4())
+        file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
 
-    for file_id, file_info in pdf_tracker.items():
-        file_path = file_info["path"]
-        loader = PyMuPDFLoader(file_path)
-        documents = loader.load()
+        # Check if the PDF file already exists in local storage
+        if any(file_info["filename"] == file.filename for file_info in pdf_tracker.values()):
+            raise HTTPException(status_code=400, detail="File already uploaded locally.")
 
-        if not documents:
-            print(f"No content found in {file_path}")
-            continue
+        # Check if the file_id is already in Pinecone
+        index = pc.Index(index_name)
+        result = index.query(
+            vector=np.zeros(384).tolist(),  # Dummy query vector
+            top_k=1,  # Only need to check existence
+            include_metadata=True,
+            namespace=index_name,
+            filter={"file_id": file_id}
+        )
 
-        text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
-        texts = text_splitter.split_documents(documents)
+        if result and result.get('matches'):
+            raise HTTPException(status_code=400, detail="File already uploaded to Pinecone.")
 
-        if not texts:
-            print(f"No text could be extracted from {file_path}")
-            continue
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
+        # Process the newly uploaded PDF
         try:
-            text_chunks = [text.page_content for text in texts]
-            text_embeddings = embeddings.embed_documents(text_chunks)
+            loader = PyMuPDFLoader(file_path)
+            documents = loader.load()
+
+            if not documents:
+                raise HTTPException(status_code=400, detail="No content found in the PDF.")
+
+            text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+            texts = text_splitter.split_documents(documents)
+
+            if not texts:
+                raise HTTPException(status_code=400, detail="No text could be extracted from the PDF.")
+
+            existing_texts = set()
+
+            for text in texts:
+                # Check if the text already exists in Pinecone
+                result = index.query(
+                    vector=embeddings.embed_documents([text.page_content])[0],
+                    top_k=1,
+                    include_metadata=True,
+                    namespace=index_name
+                )
+
+                if result and result.get('matches'):
+                    existing_texts.add(text.page_content)
+
+            # Filter out documents that already exist in Pinecone
+            new_text_chunks = [
+                text.page_content for text in texts if text.page_content not in existing_texts
+            ]
+            
+            pdf_tracker[file_id] = {
+                "filename": file.filename,
+                "path": file_path,
+                "pinecone_namespace": file_id,
+                "document_ids": [f"{file_id}_{i}" for i in range(len(new_text_chunks))]
+            }
+                
+            if not new_text_chunks:
+                raise HTTPException(status_code=400, detail="No new text to add from the PDF.")
+
+            text_embeddings = embeddings.embed_documents(new_text_chunks)
 
             if isinstance(text_embeddings, list):
                 text_embeddings = np.array(text_embeddings)
 
-            vectors = [
-                {
-                    "id": f"{file_id}_{i}",
-                    "values": vec.tolist(),
-                    "metadata": {"text": text_chunks[i], "file_id": file_id}
-                }
-                for i, vec in enumerate(text_embeddings)
-            ]
+            # vectors = [
+            #     {
+            #         "id": f"{file_id}_{i}",
+            #         "values": vec.tolist(),
+            #         "metadata": {"text": new_text_chunks[i], "file_id": file_id}
+            #     }
+            #     for i, vec in enumerate(text_embeddings)
+            # ]
             
-
+            # Add all documents to the vector store
             all_documents.extend([
-                Document(page_content=text_chunks[i], metadata={"file_id": file_id})
-                for i in range(len(text_chunks))
+                Document(page_content=new_text_chunks[i], metadata={"file_id": file_id})
+                for i in range(len(new_text_chunks))
             ])
+
+            if all_documents:
+                # Add all documents to the vector store with file_id
+                vector_store.add_documents(documents=all_documents, ids=[f"{file_id}_{i}" for i in range(len(all_documents))])
+
+            return {"message": f"PDF {file.filename} uploaded and processed successfully", "file_id": file_id}
         except Exception as e:
-            print(f"Error processing PDF and creating Pinecone index: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
-    # Add all documents to the vector store
-    uuids = [str(uuid.uuid4()) for _ in range(len(all_documents))]
-    vector_store.add_documents(documents=all_documents, ids=uuids)
-
-def get_pdf_retriever():
-    return vector_store.as_retriever()
-
-@app.post("/upload-pdf/")
-async def upload_pdf(file: UploadFile = File(...)):
-    try:
-        file_id = str(uuid.uuid4())
-        file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        pdf_tracker[file_id] = {
-            "filename": file.filename,
-            "path": file_path,
-            "pinecone_namespace": file_id
-        }
-        
-        # Process the uploaded PDFs immediately
-        process_pdfs()
-        
-        return {"message": f"PDF {file.filename} uploaded and processed successfully", "file_id": file_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 class ChatRequest(BaseModel):
     question: str
     
@@ -353,7 +387,6 @@ async def chat(request: ChatRequest):
     
     return {"answer": final_answer}
 
-
 @app.delete("/remove-pdf/{file_id}")
 async def remove_pdf(file_id: str):
     if file_id not in pdf_tracker:
@@ -361,16 +394,26 @@ async def remove_pdf(file_id: str):
     
     try:
         # Remove from local storage
-        os.remove(pdf_tracker[file_id]["path"])
+        file_path = pdf_tracker[file_id]["path"]
+        os.remove(file_path)
         
-        # Remove from Pinecone
+        # Remove all entries related to the file_id from Pinecone
         index = pc.Index(index_name)
-        index.delete(delete_all=True, namespace=file_id)
-        
+        document_ids = pdf_tracker[file_id]["document_ids"]
+
+        # Delete each document ID
+        if document_ids:
+            index.delete(ids=document_ids)
+
         # Remove from tracker
         del pdf_tracker[file_id]
         
-        return {"message": f"PDF {pdf_tracker[file_id]['filename']} removed successfully"}
+        return {"message": "PDF removed successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/')
+def sample():
+    return 'Running!'
 
