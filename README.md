@@ -16,7 +16,9 @@ Key components:
 - `pages/`: Next.js page components
 - `components/`: Reusable React components (e.g., ChatWindow, PDFUploader)
 - `api/`: API client for communicating with the backend
-Image :
+
+  
+# Images :
 <img width="1512" alt="Screenshot 2024-08-24 at 11 44 37 PM" src="https://github.com/user-attachments/assets/68ebcbbd-8ac2-42cc-b74b-b591c0ae351c">
 <img width="319" alt="Screenshot 2024-08-24 at 11 54 30 PM" src="https://github.com/user-attachments/assets/617bd1a3-7651-47ff-9ed7-952ed2d477f7">
 
