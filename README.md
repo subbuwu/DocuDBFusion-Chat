@@ -13,7 +13,7 @@ The application follows a client-server architecture:
 
 
 Key components:
-- `pages/`: Next.js page components
+- `app/`: Next.js page components
 - `components/`: Reusable React components (e.g., ChatWindow, PDFUploader)
 - `api/`: API client for communicating with the backend
 
