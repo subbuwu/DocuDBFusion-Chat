@@ -1,4 +1,4 @@
-# PDF and SQLite Chat Application ([Watch the app in action](https://drive.google.com/file/d/1j6j5-GYDTaT_53lsi6ciUI8Xz-QwgslW/view?usp=sharing))
+# PDF and SQLite Chat Application ([Watch the app in action](https://drive.google.com/file/d/1DDdGCyRiLnf4kYCpytVDYJx1XAtsfIh3/view?usp=drivesdk))
 
 This full-stack application allows users to chat with PDF content and SQLite database information simultaneously using natural language queries.
 ## Architecture Overview
